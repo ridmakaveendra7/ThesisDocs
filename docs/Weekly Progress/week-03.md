@@ -1,5 +1,7 @@
 # Week 3 progress — vulnerability research
 
+**Author:** Ridma Kaveendra
+
 Research output for [`Weekly Requirements/week-03.md`](../Weekly%20Requirements/week-03.md).
 Scope: **backend only** (Java/Spring Boot). The frontend stack isn't decided
 yet, so anything inherently frontend-specific (DOM-based XSS, client-side
@@ -318,6 +320,230 @@ depending partly on the frontend, because the misconfiguration itself is
 source alone — only their real-world *exploitability* is frontend-dependent,
 which is called out in each entry's caveats.)
 
+---
+
+# Fuzz-testing research
+
+Output for the "Additional requirement: fuzz-testing target research" section
+of [`Weekly Requirements/week-03.md`](../Weekly%20Requirements/week-03.md).
+Two genuinely different kinds of fuzzing apply here, and most of the value
+comes from picking the right one per target rather than one tool for
+everything.
+
+## The two levels of fuzzing that apply here
+
+- **Unit/library-level, coverage-guided (white-box).** The fuzzer calls a
+  Java method directly with mutated arguments, using code-coverage feedback
+  to steer future mutations toward unexplored branches. Fast (no HTTP, no
+  running server), finds crashes/exceptions/invariant violations deep inside
+  parsing and validation logic. This is the right level for anything that's
+  fundamentally "a function that parses/validates a string or byte sequence"
+  — which describes most of the interesting candidates from the requirements
+  doc (the §8.1 signature format, nonce validation, the `state` parameter,
+  bank-response parsing).
+- **HTTP/protocol-level (black-box).** The fuzzer sends mutated HTTP
+  requests at the running app and observes responses/status
+  codes/timing/crashes. Necessary for anything where the vulnerability is in
+  how a value flows through the whole request pipeline (auth filter, content
+  negotiation, framework-level (de)serialization), not just in one function.
+  This is the right level for the JWT/bearer-token validation path — you
+  want to fuzz the actual `Authorization` header handling, not just a
+  decoder function in isolation.
+
+## Tooling
+
+### Jazzer — unit-level, coverage-guided (JVM)
+
+Jazzer is a coverage-guided, in-process fuzzer for the JVM (built on
+libFuzzer's approach, from Code Intelligence). It integrates directly with
+JUnit 5.9+: add `com.code-intelligence:jazzer-junit` as a test-scope Maven
+dependency, then write a method annotated `@FuzzTest` taking a
+`FuzzedDataProvider` parameter. Jazzer generates and mutates inputs for you,
+splitting the fuzzer-provided byte stream into typed values via provider
+methods (`consumeString`, `consumeInt`, `consumeBoolean`,
+`consumeRemainingAsString`, etc.). Example shape:
+
+```java
+@FuzzTest
+void fuzzSigningInputParser(FuzzedDataProvider data) {
+    String purpose = data.consumeString(16);
+    String nonce = data.consumeString(32);
+    String paymentId = data.consumeString(32);
+    String amountMinor = data.consumeString(16);
+    String currency = data.consumeString(8);
+    String creditorIban = data.consumeString(40);
+    // call the real signing-input builder/parser with these values —
+    // Jazzer flags any uncaught exception, and its own sanitizers flag
+    // security-relevant sinks reached along the way.
+    SigningInput.build(purpose, nonce, paymentId, amountMinor, currency, creditorIban);
+}
+```
+
+Two run modes: **regression** (default — replays previously-found crashing
+inputs saved under `src/test/resources/<package>/<ClassName>Inputs/` to make
+sure old bugs stay fixed; this is what runs on a normal `mvn test`) and
+**fuzzing** (set `JAZZER_FUZZ=1` — actually explores new inputs, and runs
+until stopped/timed out rather than to completion). That distinction matters
+for CI design: regression mode is cheap enough for every pipeline run;
+exploratory fuzzing needs a separate, deliberately time-boxed job (e.g.
+nightly, or a fixed `-Djazzer.time_limit=300s`-style bound), not something
+you run unbounded on every push.
+
+Jazzer ships built-in **sanitizers** (bug detectors) for security-relevant
+sinks — confirmed in its docs: Server-Side Request Forgery, OS Command
+Injection, and File Path Traversal, with more added across releases (check
+the current release's docs for the full list rather than assuming a specific
+one is present). This means a single `@FuzzTest` that feeds fuzzed input
+into, e.g., the SSRF-carrying redirect-check endpoint's logic can flag the
+vulnerability directly, not just an uncaught-exception crash.
+
+### OWASP ZAP Fuzzer add-on — HTTP-level, black-box
+
+Distinct from ZAP's baseline/active *scan* (already planned for this
+project's DAST work per the vulnerability catalog above) — the Fuzzer is a
+separate, request-driven feature: right-click a captured request → **Attack
+→ Fuzz**, pick one or more insert points (it recurses into JSON body fields
+individually, so a POST body like `{"redirectUri": "..."}` can have just
+that field fuzzed), and attach a **payload generator** — a wordlist/file
+fuzzer (ZAP ships fuzzdb-derived payload files), a numeric sequence, or a
+custom script. **Payload processors** can transform each payload before
+sending (e.g. base64/URL-encode it) — relevant if fuzzing something like a
+JWT segment where the raw mutated value needs re-encoding before it's a
+well-formed token again.
+
+Caveat worth flagging for whoever wires the CI job: the Fuzzer add-on is
+primarily driven through the ZAP desktop GUI. Unlike active/baseline scan
+(which has first-class headless/CI support), there's no equally
+well-documented way to run a Fuzzer campaign unattended in a pipeline — using
+it will likely mean either an interactive/manual testing pass, or scripting
+it through ZAP's automation framework/API, which needs its own investigation
+before assuming it slots into the existing pipeline automatically.
+
+### JWT-specific fuzzers — the guaranteed auth-area target
+
+`jwt_tool` has a dedicated fuzzing mode (`-I`, injection mode): point it at
+a captured token and a wordlist, and it substitutes values into a chosen
+part of the token (header, payload claim, or signature) across a sequence of
+requests, useful for both crash-style fuzzing and directed injection testing
+(XSS/SQLi payloads riding in a claim value). Lighter alternatives
+(`jwt-fuzzer`, `jwtfuzz`) just generate batches of mutated/malformed token
+strings without the request-replay workflow.
+
+**Caveat specific to this app:** jwt_tool and similar tools also test for
+known JWT exploit classes like the **RS256→HS256 algorithm-confusion
+attack** — that attack requires an *asymmetric* signing scheme where the
+public key can be fed back in as an HMAC secret. This app's JWTs are
+symmetric HS256 end-to-end, self-issued and self-verified with one shared
+secret — there's no public key for an attacker to redirect, so that specific
+exploit class doesn't apply and a directed test for it should (correctly)
+come back negative. Don't list algorithm confusion as an expected finding
+here; the actual value of fuzzing this path is in malformed-token robustness
+(bad base64 segments, wrong segment counts, truncated/oversized tokens,
+unexpected claim types) rather than that specific known exploit.
+
+### RESTler — stateful, spec-driven REST API fuzzing
+
+Microsoft's RESTler is a *stateful* REST API fuzzer: it reads an
+OpenAPI/Swagger definition, infers producer-consumer dependencies between
+endpoints (e.g. "an account resource returned by endpoint A is consumed by
+endpoint B"), and fuzzes parameters *within* realistic multi-request
+sequences rather than one request at a time. That's a good match for a
+banking flow that's inherently sequential (register → login → use the token
+→ act on a resource) — ad hoc single-request fuzzers can't naturally
+exercise that.
+
+**Caveat:** RESTler needs an OpenAPI/Swagger spec to generate its fuzzing
+grammar from; `finapp/` doesn't currently expose one. Generating one (e.g.
+via `springdoc-openapi`) is a prerequisite, not something usable today —
+note this as future setup work rather than a Phase 1/near-term item.
+
+### Fuzzing structured/length-prefixed formats (the §8.1 signature format specifically)
+
+General coverage-guided fuzzing principle worth calling out for this
+specific target: naive random-byte mutation performs poorly against
+structured formats with framing (like the spec's `F(x) = length ":" value`
+length-prefixed encoding), because most random mutations fail the length
+check immediately and never reach the interesting parsing/validation code
+behind it. Format-aware/structure-aware mutation (generating inputs that
+respect the framing, or seeding the fuzzer's corpus with valid example
+signing inputs per `purpose`) reaches meaningfully more coverage. Concretely
+for Jazzer: prefer building the fuzz test so `FuzzedDataProvider` supplies
+the *fields* (purpose/nonce/paymentId/amountMinor/currency/creditorIban)
+which the test code then assembles into the length-prefixed form itself
+(as in the code example above), rather than fuzzing the already-assembled
+string as one opaque blob — that keeps generated inputs structurally valid
+so the fuzzer can actually explore the parser's logic instead of just its
+length-check failure path.
+
+## Mapping candidate targets to concrete fuzz setups
+
+| Target (from requirements doc) | Level | Tool/approach | Concrete test idea |
+|---|---|---|---|
+| JWT/bearer-token validation path (**guaranteed** auth-area target) | Both | Unit: Jazzer `@FuzzTest` directly against the token-decoding method. HTTP: `jwt_tool -I` against a protected endpoint's `Authorization` header | Fuzz malformed base64 segments, wrong `.`-part counts, truncated/oversized tokens, unexpected claim types |
+| §8.1 canonical signature format parser | Unit | Jazzer, fields fed via `FuzzedDataProvider`, seeded corpus of valid per-purpose examples | Mismatched declared vs. actual lengths, embedded `:` delimiters inside values, empty vs. malformed trailing fields for `REGISTER`/`LOGIN` |
+| Payment fields (`amountMinor`/`currency`/`creditorIban`) | Unit + HTTP | Jazzer on the validation method once it exists; ZAP Fuzzer on the POST body fields once the endpoint exists | Boundary/overflow amounts, malformed currency codes, malformed IBAN checksums |
+| Nonce handling | Unit | Jazzer on the validator (single-use/expiry/purpose-binding checks) | Malformed/boundary nonce values, reuse/replay edge cases |
+| `state` parameter (OAuth/SCA redirect) | Unit + manual/HTTP | Jazzer on generate/bind/verify functions; manual/ZAP tampering of the redirect callback query string | Missing, reused, or cross-user `state` values |
+| Bank responses (token/consent/`tppMessages`) | Unit | Jazzer on the response-deserialization/branching code, treating the bank sandbox as an untrusted supplier per the spec's own trust model | Malformed/unexpected JSON shapes, unexpected `tppMessages` codes |
+| Free-text bank data (`creditorName`, remittance info) | Unit + HTTP | Jazzer on whatever renders/encodes this text; same field also covered by the already-planned XSS/ZAP work from a different angle | Unicode edge cases, control characters, length extremes — parser robustness, distinct from the XSS payload-class testing |
+| Session channel marker (APP/WEB) | Unit | Jazzer on the marker parsing/validation code | Malformed/spoofed marker values — a bug here undermines the whole access-matrix enforcement rule |
+
+## CI/pipeline note specific to this project
+
+This project's pipeline is GitLab CI (`.gitlab-ci.yml`), and it's meant to be
+what students run against their own evolving `finapp/` as a normal part of
+the exercise — so a per-push or nightly-scheduled fuzzing job is the wrong
+shape either way: per-push is too slow/unbounded for something students
+trigger constantly, and a nightly *schedule* runs on GitLab's own clock
+regardless of whether a student has pushed anything, which doesn't match
+"run this against what I just built." The right shape is a job students
+trigger themselves, on demand, bounded in cost:
+
+- **On-demand trigger, not a schedule.** A normal job with `when: manual` in
+  the *same* `.gitlab-ci.yml` (its own stage, e.g. `fuzz`) shows up as a
+  play button in the pipeline UI that a student clicks whenever they want to
+  fuzz their current code — no separate scheduled pipeline needed, and it
+  doesn't block or slow down the pipeline's regular stages since manual jobs
+  don't run automatically. (The one real limitation here is that `when:
+  manual` isn't supported on cross-project/multi-project *trigger* jobs —
+  irrelevant for this project, since this would be an ordinary job in the
+  same pipeline, not a trigger job calling another project's pipeline.)
+- **GitLab's own built-in "Coverage-guided fuzz testing" CI/CD feature is
+  deprecated as of GitLab 18.0** (removal planned for 19.0), with GitLab's
+  own guidance pointing users toward SAST/DAST instead — so this manual job
+  should be a plain custom job invoking Jazzer directly (e.g. `mvn test
+  -Dtest=<FuzzTestClass> -DargLine="-Djazzer.fuzz=1"`-style invocation, exact
+  flags TBD when actually wired up), not GitLab's "Application Security"
+  fuzzing feature category.
+- **Per-method time and iteration limits are directly supported by Jazzer**,
+  which resolves the "unbounded exploratory run" concern: `@FuzzTest` takes a
+  `maxDuration` attribute (e.g. `@FuzzTest(maxDuration = "30s")`, also
+  overridable at runtime via `-Djazzer.max_duration=...` without touching the
+  test source) and a `maxExecutions` attribute capping the number of fuzzing
+  iterations per method. Setting both on every fuzz test method means the
+  on-demand job has a predictable, bounded worst-case runtime regardless of
+  how many fuzz targets exist — worth deciding a per-method default (e.g. 30s
+  and/or a fixed execution count) as part of the actual harness work, not
+  something to leave unbounded "for now."
+- The ZAP Fuzzer add-on's lack of first-class headless support (noted above)
+  still means it likely sits outside the automated pipeline for now — a
+  manual/periodic testing activity rather than a pipeline job at all, distinct
+  from the already-planned ZAP baseline/active DAST scan and from the
+  on-demand Jazzer job described above.
+
+## Caveats / non-findings worth stating explicitly
+
+- **JWT algorithm confusion does not apply here** — this app's HS256
+  self-issued/self-verified tokens have no asymmetric key for an attacker to
+  redirect; don't expect or report that specific exploit class as a finding.
+- **RESTler isn't usable yet** — it needs an OpenAPI/Swagger definition that
+  `finapp/` doesn't currently produce; treat "add `springdoc-openapi`" as a
+  prerequisite noted for later, not a gap in this research.
+- **The ZAP Fuzzer add-on and GitLab's native fuzzing feature are both
+  awkward CI fits** for different reasons (interactive-GUI-first vs.
+  deprecated) — the Jazzer/JUnit route is the one with a clean, ordinary
+  `mvn test`-based CI story today.
+
 ## Sources
 
 - [CVE-2026-40976: Spring Boot 4.0 Actuator Authorization Bypass — HeroDevs](https://www.herodevs.com/blog-posts/cve-2026-40976-spring-boot-4-0-actuator-authorization-bypass)
@@ -347,3 +573,32 @@ which is called out in each entry's caveats.)
 - [Damn Vulnerable Java (EE) Application — appsecco/dvja](https://github.com/appsecco/dvja)
 - [Top 25 Most Dangerous Software Weaknesses of 2025 — Infosecurity Magazine](https://www.infosecurity-magazine.com/news/top-25-dangerous-software/)
 - [OWASP Top 10 2026: All 10 Risks Explained — Reflectiz](https://www.reflectiz.com/blog/owasp-top-ten-2026/)
+
+**Fuzz-testing research:**
+- [Jazzer — CodeIntelligenceTesting/jazzer (GitHub)](https://github.com/CodeIntelligenceTesting/jazzer)
+- [The Ultimate Guide to Fuzz Testing in Java — Coding Steve](https://stevenpg.com/posts/ultimate-guide-fuzzing-in-java/)
+- [Java Fuzzing with Jazzer — Code Intelligence](https://www.code-intelligence.com/blog/java-fuzzing-with-jazzer)
+- [Jazzer Java Fuzzing Guide — QASkills.sh](https://qaskills.sh/blog/jazzer-java-fuzzing-guide)
+- [jazzer-junit — Maven Central](https://central.sonatype.com/artifact/com.code-intelligence/jazzer-junit)
+- [FuzzedDataProvider — Jazzer API docs](https://codeintelligencetesting.github.io/jazzer-docs/jazzer-api/com/code_intelligence/jazzer/api/FuzzedDataProvider.html)
+- [FuzzTest (maxDuration / maxExecutions) — Jazzer JUnit API docs](https://codeintelligencetesting.github.io/jazzer-docs/jazzer-junit/com/code_intelligence/jazzer/junit/FuzzTest.html)
+- [Practical Jazzer for the Snazzy Fuzzer — ServiceNow Security Lab](https://securitylab.servicenow.com/research/2024-10-28-jazzer-practical-tips/)
+- [Job control (when: manual) — GitLab Docs](https://microfluidics.utoronto.ca/gitlab/help/ci/jobs/job_control.md)
+- [Add support for `when:manual` within triggered pipelines — GitLab issue #201938](https://gitlab.com/gitlab-org/gitlab/-/issues/201938)
+- [Fuzzing — Zed Attack Proxy (ZAP)](https://www.zaproxy.org/docs/desktop/addons/fuzzer/)
+- [Fuzzer dialog — ZAP](https://www.zaproxy.org/docs/desktop/addons/fuzzer/dialogue/)
+- [Payloads dialog — ZAP](https://www.zaproxy.org/docs/desktop/addons/fuzzer/payloads/)
+- [ZAP – Payload Processors dialog](https://www.zaproxy.org/docs/desktop/addons/fuzzer/processors/)
+- [How to use Fuzzing feature in OWASP ZAP — Sameera De Silva, Medium](https://samedesilva.medium.com/how-to-use-fuzzing-feature-in-owasp-zap-2-9-0-48df6a89bef8)
+- [jwt_tool — Tampering and Fuzzing (Wiki)](https://github.com/ticarpi/jwt_tool/wiki/Tampering-and-Fuzzing)
+- [jwt_tool — ticarpi (GitHub)](https://github.com/ticarpi/jwt_tool)
+- [jwt-fuzzer — andresriancho (GitHub)](https://github.com/andresriancho/jwt-fuzzer)
+- [jwtfuzz — ropwareJB (GitHub)](https://github.com/ropwareJB/jwtfuzz)
+- [RESTler: Stateful REST API Fuzzing — Microsoft Research](https://www.microsoft.com/en-us/research/publication/restler-stateful-rest-api-fuzzing/)
+- [RESTler finds security and reliability bugs through automated fuzzing — Microsoft Research](https://www.microsoft.com/en-us/research/blog/restler-finds-security-and-reliability-bugs-through-automated-fuzzing/)
+- [microsoft/restler-fuzzer (GitHub)](https://github.com/microsoft/restler-fuzzer)
+- [Stateful REST API Fuzzing with RESTler — Code Intelligence](https://www.code-intelligence.com/blog/stateful-rest-api-fuzzing)
+- [FormatFuzzer: Effective Fuzzing of Binary File Formats — ACM TOSEM](https://dl.acm.org/doi/full/10.1145/3628157)
+- [libFuzzer – a library for coverage-guided fuzz testing — LLVM](https://llvm.org/docs/LibFuzzer.html)
+- [Coverage-guided fuzz testing (deprecated) — GitLab Docs](https://docs.gitlab.com/user/application_security/coverage_fuzzing/)
+- [Announce the deprecation of the Coverage-guided fuzz testing feature — GitLab issue #517841](https://gitlab.com/gitlab-org/gitlab/-/issues/517841)
