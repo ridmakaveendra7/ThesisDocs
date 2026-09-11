@@ -172,13 +172,20 @@ imperfect starting point.
 
 | Endpoint | Purpose | Carries |
 |---|---|---|
-| `POST /api/auth/register` | register user | — |
-| `POST /api/auth/login` | issue JWT | hardcoded JWT secret |
-| `GET /api/greeting?name=` | authenticated smoke-test endpoint | reflected XSS |
+| `POST /api/auth/register` | register user | hardcoded JWT secret, reflected XSS in the confirmation response |
+| `POST /api/auth/login` | issue JWT | — |
 | `GET /api/users/search?name=` | look up users by (partial) name | SQL injection |
 | `GET /api/reports/download?file=` | download a report/statement file | path traversal |
-| `POST /api/bank/redirect-check` | validate a TPP redirect URI is reachable | SSRF |
+| `POST /api/notifications/webhook-url` | register a webhook URL for account notifications | SSRF |
 | `/actuator/**` | ops introspection | exposed/unauthenticated actuator |
+
+Both `POST /api/auth/register` and `POST /api/notifications/webhook-url`
+replace earlier carrier designs (`/api/greeting?name=` and
+`/api/bank/redirect-check`) that turned out to be poor fits: a
+smoke-test-only endpoint isn't a real FinSec feature, and a "bank redirect"
+feature can't be justified in Phase 1 when EuroTrust integration is Phase 2
+work. Both replacements carry the same vulnerability classes through
+features Phase 1 can actually justify on its own.
 
 Plus one working **Jazzer fuzz test** against the JWT/bearer-token
 validation path, as a reference example (see `working_spec_finsec.md` §4).
@@ -390,9 +397,10 @@ endpoints take only the token.
 **Consent** (`POST /consents`, company token, header `TPP-Redirect-URI`) —
 body includes `access`, `recurringIndicator`, `frequencyPerDay`. Returns
 `consentId` and an `scaRedirect` link. The redirect URI must be registered
-for the `client_id`. (This is the real, correctly-validated counterpart to
-Phase 1's deliberately-broken `/api/bank/redirect-check` SSRF carrier — see
-§6.7.)
+for the `client_id`. Implementing this correctly-validated redirect handling
+is the real-world counterpart to the SSRF mistake Phase 1 seeds elsewhere
+(§4.1's webhook-URL endpoint) — the same "don't fetch/redirect to an
+unvalidated URL" discipline applies here too (§6.7).
 
 **SCA redirect** — `GET /sca/authorize?consentId=...&state=...` (bank
 login/consent form), `POST /sca/authorize` (approval, 302 back to
