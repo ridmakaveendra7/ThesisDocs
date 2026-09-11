@@ -29,24 +29,23 @@ The smallest Spring Boot app that:
 4. Does nothing else. No accounts, transactions, payments, or bank
    integration — those are later phases, built by students on top of this.
 
-Total target surface: **7 endpoints**, none more than ~15 lines of handler
+Total target surface: **6 endpoints**, none more than ~15 lines of handler
 code, plus one fuzz test. There is no requirement to match any particular
-prior structure — optimize purely for lines-of-code-per-finding.
+prior structure — optimize purely for lines-of-code-per-finding. Every
+carrier below is chosen to be a feature Phase 1 would plausibly need anyway,
+not an invented test endpoint — see §3.3 and §3.8 for why the earlier
+`/api/greeting` and `/api/bank/redirect-check` designs were replaced.
 
 ## 2. Application surface
 
 | Endpoint | Purpose | Vulnerability carried |
 |---|---|---|
-| `POST /api/auth/register` | register user | — |
-| `POST /api/auth/login` | issue JWT | §3.5 hardcoded JWT secret |
-| `GET /api/greeting?name=` | authenticated smoke-test endpoint | §3.3 reflected XSS |
+| `POST /api/auth/register` | register user | §3.5 hardcoded JWT secret, §3.3 reflected XSS |
+| `POST /api/auth/login` | issue JWT | — |
 | `GET /api/users/search?name=` | look up users by (partial) name | §3.6 SQL injection |
 | `GET /api/reports/download?file=` | download a report/statement file | §3.7 path traversal |
-| `POST /api/bank/redirect-check` | validate a TPP redirect URI is reachable | §3.8 SSRF |
+| `POST /api/notifications/webhook-url` | register a webhook URL for account notifications | §3.8 SSRF |
 | `/actuator/**` | ops introspection (new dependency) | §3.1 exposed actuator |
-
-`/api/greeting` replaces any prior smoke-test endpoint — it exists solely to
-carry the XSS finding on an authenticated route; it has no other purpose.
 
 ## 3. Vulnerabilities to introduce
 
@@ -61,10 +60,19 @@ carry the XSS finding on an authenticated route; it has no other purpose.
   (`setAllowedOriginPatterns(List.of("*"))`, not `setAllowedOrigins`, so
   Spring accepts it at startup) with credentials allowed.
 
-### 3.3 Reflected XSS via `/api/greeting` — §7 (CWE-79)
-- Takes `?name=` and returns `"Hello, " + name` with an HTML content type
-  (`text/html`), unescaped. A JSON response would not be exploitable in a
-  browser — the HTML content type is what makes this a real XSS carrier.
+### 3.3 Reflected XSS via the registration confirmation — §7 (CWE-79)
+- `POST /api/auth/register`'s response body switches from a static "User
+  registered successfully" string to an HTML confirmation that includes the
+  submitted username unescaped (e.g. `"<h1>Welcome, " + username + "!</h1>"`),
+  with an HTML content type (`text/html`). A JSON response would not be
+  exploitable in a browser — the HTML content type is what makes this a real
+  XSS carrier.
+- Replaces an earlier design that used a dedicated `/api/greeting?name=`
+  smoke-test endpoint purely to host this vulnerability. A standalone
+  endpoint whose only job is reflecting a query param isn't something a real
+  FinSec app would ever have — a registration confirmation is a feature
+  every app already needs, so this carries the same finding without
+  inventing a fake one. It also removes an endpoint instead of adding one.
 
 ### 3.4 Verbose error responses — §3 (CWE-209/CWE-756)
 - Enable full stack-trace/message/binding-error output on errors
@@ -96,10 +104,18 @@ carry the XSS finding on an authenticated route; it has no other purpose.
   legitimate to fetch by name first.
 
 ### 3.8 SSRF — §9 (CWE-918)
-- `POST /api/bank/redirect-check`, body `{ "redirectUri": "..." }`, makes a
-  server-side HTTP call to that URL with no allowlist — framed as "confirm
-  this redirect URI is reachable," a deliberately-wrong stand-in for the
-  spec's `TPP-Redirect-URI` validation.
+- `POST /api/notifications/webhook-url`, body `{ "webhookUrl": "..." }`,
+  registers a URL the user wants account notifications sent to, and
+  immediately makes a server-side HTTP call to it (to "verify it's
+  reachable") with no allowlist.
+- Replaces an earlier design that used `/api/bank/redirect-check` to stand in
+  for validating the spec's `TPP-Redirect-URI`. That framing presupposes
+  EuroTrust Bank integration, which doesn't exist until Phase 2 — a Phase 1
+  feature shouldn't be justified by a Phase 2 dependency. A notification
+  webhook needs no bank at all: it's FinSec's own feature end-to-end, and
+  "register a URL, then have the server call it" is exactly the same SSRF
+  mechanism (an unvalidated server-side fetch of a user-supplied URL), just
+  hung on a carrier Phase 1 can actually justify on its own.
 
 ### 3.9 CSRF disabled — §5 (CWE-352)
 - CSRF protection is disabled in the security configuration rather than
@@ -181,8 +197,8 @@ deferred vulnerabilities below.
 - [ ] `/actuator/env` and `/actuator/heapdump` return data without a token.
 - [ ] A cross-origin credentialed `fetch` against an authenticated endpoint
       is allowed by the CORS response headers.
-- [ ] `GET /api/greeting?name=<script>alert(1)</script>` reflects the payload
-      unescaped in an `text/html` response.
+- [ ] Registering with the username `<script>alert(1)</script>` reflects it
+      unescaped in the registration confirmation's `text/html` response.
 - [ ] Registering the same username twice returns a body containing a Java
       stack trace / exception message.
 - [ ] The JWT works correctly with no externally configured secret (proving
@@ -190,8 +206,8 @@ deferred vulnerabilities below.
 - [ ] `GET /api/users/search?name=' OR '1'='1` returns all users.
 - [ ] `GET /api/reports/download?file=../../../../etc/passwd` (or an
       equivalent app file) returns content outside the reports directory.
-- [ ] `POST /api/bank/redirect-check` with an attacker-controlled/OOB URL
-      triggers an outbound request from the server.
+- [ ] `POST /api/notifications/webhook-url` with an attacker-controlled/OOB
+      URL triggers an outbound request from the server.
 - [ ] The JWT-validation `@FuzzTest` runs locally (`JAZZER_FUZZ=1`) and
       terminates on its own within the configured `maxDuration`/
       `maxExecutions` bound rather than running indefinitely.
