@@ -36,6 +36,7 @@ have no counterpart in the reference spec.
 | How errors are shown to the user | Full error details/stack traces are shown instead of a generic message | OWASP ZAP, manual |
 | Cross-site request forgery (CSRF) protection | Protection is turned off | SonarQube |
 | Logging login attempts (audit trail) | The submitted username is written into the log unescaped, so a crafted username can inject fake log lines (log injection) | Semgrep, SonarQube |
+| Validating the session token on every request | A malformed or crafted token (bad encoding, wrong structure, unexpected claim values) isn't cleanly rejected, and either crashes the check or slips through it | Jazzer fuzz test |
 
 ## Phase 2 (student-built)
 
