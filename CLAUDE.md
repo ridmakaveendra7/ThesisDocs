@@ -9,8 +9,19 @@ Development", Fulda University of Applied Sciences), not itself a git repo. The
 actual codebase lives one level down:
 
 - `finapp/` — the only git repository here (remote: GitLab at
-  `git-ce.rwth-aachen.de/.../secure-software-pipeline-demo`). A Spring Boot app,
-  currently on branch `feature/test-stat-ci`. All development work happens here.
+  `git-ce.rwth-aachen.de/.../secure-software-pipeline-demo`), currently on
+  branch `feature/test-stat-ci`. All development work happens here. As of
+  Phase 1's frontend work, it's a multi-service layout, not a single Spring
+  Boot project at its root:
+  - `finapp/docker-compose.yml`, `finapp/.env` — orchestrate the whole
+    stack (`backend` + `db` + `frontend` services); kept at the repo root
+    since Docker Compose auto-loads `.env` from the compose file's own
+    directory.
+  - `finapp/backend/` — the Spring Boot app (moved here from the repo root
+    during Phase 1 restructuring; every path below that used to say
+    `finapp/src/...` etc. is now `finapp/backend/src/...`).
+  - `finapp/frontend/` — the React + Vite SPA (Phase 1's frontend, per
+    `phase 1 spec.md`).
 - `docs/Weekly Requirements/` — one file per week (week-numbered), each stating
   that week's planned work. **Defining these requirements week by week is
   itself part of the thesis** — always check the highest-numbered file here
@@ -36,7 +47,7 @@ under `docs/Weekly Requirements/` and `docs/Weekly Progress/` (see above) —
 always read the latest week in each, not just week 1, and don't rely on this
 file's Architecture section below staying in sync with them as weeks progress.
 
-## Commands (run from `finapp/`)
+## Commands (run from `finapp/backend/`, not `finapp/`)
 
 Build requires **JDK 17+** (`pom.xml` targets `java.version=17`; Spring Boot
 4.1.0's baseline also requires 17+). The system default `JAVA_HOME` on this
@@ -59,8 +70,13 @@ JAVA_HOME="/c/Users/ridma/.jdks/corretto-17.0.13" ./mvnw clean package
 - Run the app locally: `./mvnw spring-boot:run` (no active profile is set by
   default — see Profiles below; without one it uses the default
   `application.properties`, which has no datasource configured)
-- Docker (app + Postgres): `docker compose up --build` — reads `POSTGRES_*`,
-  `DB_*`, `JWT_SECRET` from `.env` (present locally, gitignored, not committed)
+- Docker (backend + Postgres + frontend, run from `finapp/`, not
+  `finapp/backend/`): `docker compose up --build` — reads `POSTGRES_*`,
+  `DB_*`, `JWT_SECRET` from `.env` (present locally, gitignored, not
+  committed). Per `phase 1 spec.md`, this is the standard way to run the
+  whole stack during Phase 1 implementation — there's no H2/embedded-database
+  fallback, so `./mvnw test` from `finapp/backend/` also needs the `db`
+  container running (`docker compose up -d db` from `finapp/`).
 
 ## Architecture
 
@@ -69,8 +85,10 @@ Standard Spring Boot layering under `src/main/java/com/sec/finapp/`:
 (JPA entities), with request/response POJOs in `dto/`.
 
 - **Auth flow**: `AuthController` (`/api/auth/register`, `/api/auth/login`) is
-  the only implemented API surface besides the `hello`/`/api/hello` probe
-  endpoints. `AuthService` hashes passwords with BCrypt and persists `User`
+  the only implemented API surface (the earlier `hello`/`/api/hello` probe
+  endpoint was removed — see `phase 1 spec.md`'s Step 0 for why no
+  throwaway ping endpoint is used for frontend/backend connectivity
+  checking instead). `AuthService` hashes passwords with BCrypt and persists `User`
   (username, password hash, a flat `role` string). `UserService` implements
   Spring Security's `UserDetailsService` by loading a `User` and wrapping it as
   a Spring Security `UserDetails`.
@@ -99,10 +117,6 @@ Standard Spring Boot layering under `src/main/java/com/sec/finapp/`:
 
 ## Known repo quirks
 
-- `finapp/.gitignore` contains unresolved git merge-conflict markers
-  (`<<<<<<< HEAD` / `=======` / `>>>>>>>`) from a past merge — it still
-  functions (each line is still parsed as its own ignore pattern) but should be
-  cleaned up before relying on it for anything new.
 - `finapp/default.yaml` is a ~2.3 MB dump of Semgrep's default ruleset
   (`p/default`), currently staged in git (`git status` shows it as `A`). It's
   almost certainly a leftover from running `semgrep` locally, not something to

@@ -149,12 +149,12 @@ building anything that depends on that working.
 
 ### Backend + DB
 
-- Add a trivial, unauthenticated `GET /api/hello` endpoint (a plain
-  `ResponseEntity.ok("FinSec backend is up")` or similar, ~3 lines) —
-  **not itself a vulnerability carrier**, purely a connectivity-check
-  target. `/api/auth/register` and `/api/auth/login` aren't good candidates
-  for this because they need a request body and real side effects; this
-  needs to be a trivial `GET`.
+- No new endpoint — `POST /api/auth/login` already exists and is already
+  `permitAll()`. An invented ping/health endpoint with no FinSec purpose
+  was considered and rejected: it would be exactly the kind of throwaway
+  test scaffolding this project has already rejected elsewhere (`/api/greeting`,
+  `/api/bank/redirect-check`). Reusing a real endpoint means Bootstrap adds
+  zero backend code beyond the CORS bean below.
 - Add a `CorsConfigurationSource` bean and wire it into the
   `SecurityFilterChain` via `.cors(...)`:
   ```java
@@ -175,17 +175,58 @@ building anything that depends on that working.
   so the vulnerable version is what gets built, not a placeholder later
   swapped out. → tag the `CorsConfiguration` block with
   `// Vuln 1 - Permissive CORS configuration`.
+- **How the whole app runs locally, from this step on:** a single
+  `docker compose up` brings up all three services — `backend`, `db`
+  (Postgres), and now `frontend` — no `mvn spring-boot:run` or `npm run dev`
+  outside Docker. No H2/embedded-database fallback is used anywhere,
+  including for tests (`mvn test` also requires the Postgres container
+  running) — consistent with the database decision itself: testing against
+  a different engine than the one actually deployed would undercut the
+  exact reasoning that ruled out H2 as primary in the first place.
+- **Rename the existing `app` service to `backend`** in
+  `docker-compose.yml` (was `app`/`finapp`, now `backend`/`finapp-backend`)
+  — now that there are three services, `app` is ambiguous about which part
+  of the app it means; `backend`/`db`/`frontend` names the whole stack
+  clearly. Update its `container_name` to `finapp-backend` to match.
+- Add a `frontend` service to `docker-compose.yml`:
+  ```yaml
+  frontend:
+    image: node:20
+    container_name: finapp-frontend
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8080
+    depends_on:
+      - backend
+  ```
+  A Node dev-server container with the source volume-mounted (not a
+  production build) — Phase 1 is actively built and extended, so keeping
+  Vite's hot-reload working matters more than a production-shaped image at
+  this stage.
 
 ### Frontend
 
-- Scaffold a Vite + React app (plain JavaScript) at `finapp/frontend/`.
-- A single page that calls `GET http://localhost:8080/api/hello` on load
-  and renders the response text on screen.
-- **Verification for this step:** running `npm run dev` (frontend) and
-  `mvn spring-boot:run` (backend) separately, opening the frontend in a
-  browser, and seeing the backend's response appear — with the browser's
-  network tab confirming the response carries permissive
-  `Access-Control-Allow-Origin`/`Access-Control-Allow-Credentials` headers.
+- Scaffold a Vite + React app (plain JavaScript) at `finapp/frontend/`. **No
+  dev-server proxy** (Vite's `server.proxy`) — that would make requests
+  same-origin from the browser's point of view and mask the CORS
+  vulnerability being verified here; calls must go directly
+  cross-origin to `http://localhost:8080`.
+- A single page that, on load, fires `POST http://localhost:8080/api/auth/login`
+  with bogus credentials (e.g. `{ "username": "x", "password": "x" }`) and
+  renders whatever comes back (a `401`/error body is the *expected*,
+  correct result here — this step only proves the request reaches the
+  backend and a response comes back, not that login succeeds).
+- **Verification for this step:** `docker compose up --build` starts all
+  three services; opening `http://localhost:5173` in a browser shows the
+  backend's error response rendered on screen — with the browser's network
+  tab confirming the response carries permissive
+  `Access-Control-Allow-Origin`/`Access-Control-Allow-Credentials` headers,
+  and that no CORS error appears in the console.
 
 ## 5. Step 1 — Application security baseline
 
@@ -455,8 +496,10 @@ Goal: the last feature, and the only remaining vulnerability.
 
 ## 11. Verification checklist
 
-- [ ] The frontend loads and displays the response from `GET /api/hello`,
-      with the browser network tab showing permissive CORS headers.
+- [ ] `docker compose up --build` starts `backend`, `db`, and `frontend`
+      together; the frontend (at `http://localhost:5173`) displays the
+      backend's login error response, with the browser network tab showing
+      permissive CORS headers and no CORS error in the console.
 - [ ] `/actuator/env` and `/actuator/heapdump` return data without a token.
 - [ ] A malformed request (e.g. bad JSON to `/api/auth/login`) returns a
       body containing a Java stack trace / exception message.
@@ -485,8 +528,8 @@ Goal: the last feature, and the only remaining vulnerability.
       request from the server.
 - [ ] `docker-compose.yml`'s `db` service still has no `ports:` mapping to
       the host (the network-exposure guardrail hasn't regressed).
-- [ ] `mvn test` runs and passes with no Docker/Postgres container running
-      (Spring Boot's auto-configured embedded H2 fallback).
+- [ ] `mvn test` passes with the `db` (Postgres) container running via
+      `docker compose up -d db` — no embedded/H2 fallback is used.
 
 ## 12. Traceability to `finsec_feature_vuln_map.md`
 
