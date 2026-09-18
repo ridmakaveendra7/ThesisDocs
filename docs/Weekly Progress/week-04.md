@@ -227,3 +227,143 @@ only feature that requires being logged in to reach.
   superseded for Phase 1 purposes by `phase 1 spec.md`. Worth a decision
   later on whether to retire it or fold it in, but out of scope for this
   week.
+
+---
+
+# Week 4 progress — frontend scaffolding
+
+Output for requirement 5 of
+[`Weekly Requirements/week-04.md`](../Weekly%20Requirements/week-04.md)
+(added retroactively — see that section's own note on why).
+
+Built at `finapp/frontend/`: React 18 + Vite, pinned to stable versions
+(`react`/`react-dom` 18.3.x, `vite` 5.4.x, `@vitejs/plugin-react` 4.3.x)
+after `npm create vite@latest`'s current defaults (Vite 8, a rolldown-based
+bundler) failed outright under this machine's Node version (`20.18.0`,
+just under the `^20.19.0` the rolldown native bindings need) — a real,
+reproducible gotcha, not a one-off.
+
+Structure: `main.jsx` (entry), `App.jsx` (switches between the login view
+and a logged-in placeholder; owns logout), `api.js` (backend calls),
+`auth.js` (token storage), `pages/LoginPage.jsx`. Wired to the backend per
+§1's decisions: bearer token read from `localStorage` on every authenticated
+call (Vuln 11), no Vite dev-server proxy (would make requests same-origin
+and mask the CORS vulnerability), `VITE_API_BASE_URL` configurable via env
+var for the Docker vs. local-dev split.
+
+**Logout was added and isn't in `phase 1 spec.md` at all.** Resolved as
+frontend-only — clearing the stored token — since the backend is a
+stateless JWT resource server with no session to invalidate; confirmed
+explicitly rather than assumed before building it.
+
+Not built: the registration page (Step 3) and webhook page (Step 6) —
+deferred, following `phase 1 spec.md`'s own step order rather than building
+every page at once.
+
+---
+
+# Week 4 progress — backend endpoint/config changes
+
+Output for requirement 6 of
+[`Weekly Requirements/week-04.md`](../Weekly%20Requirements/week-04.md)
+(added retroactively).
+
+Implemented in code, each tagged per `phase 1 spec.md`'s numbered-comment
+convention:
+- **Vuln 1** (permissive CORS) — `CorsConfigurationSource` bean in
+  `SecurityConfig.java`.
+- **Vuln 2** (verbose errors) — three `server.error.*` properties in
+  `application.properties`.
+- **Vuln 3** (CSRF disabled) — pre-existing code, now commented; confirmed
+  non-exploitable in practice given Vuln 11's header-based (not cookie)
+  token transport, and that reasoning is recorded inline at the code site.
+- **Vuln 4** (exposed Actuator) — `spring-boot-starter-actuator` dependency,
+  `management.endpoints.web.exposure.include=*`, and a matching
+  `.requestMatchers("/actuator/**").permitAll()` rule — both touchpoints
+  tagged with the same vuln number per the spec's convention for a single
+  vulnerability spanning multiple locations.
+
+This completes `phase 1 spec.md` Step 1 in full. Tally: **5 of 15** numbered
+vulnerabilities now exist in code (1, 2, 3, 4, 11). Not built: Vulns 5–10
+and 12–15 (Steps 2–6 — database baseline, registration, login's backend
+half, the fuzz test, webhook registration).
+
+---
+
+# Week 4 progress — CI wiring: SonarQube + setup guide
+
+Output for requirement 7 of
+[`Weekly Requirements/week-04.md`](../Weekly%20Requirements/week-04.md)
+(added retroactively).
+
+Added a `sonarqube` job to `.gitlab/ci/static-analysis.yml`, running after
+`semgrep` via `needs` rather than in parallel. Real problems hit while
+getting it working, each now documented in
+[`docs/sonarqube-setup.md`](../sonarqube-setup.md) so they don't have to be
+rediscovered:
+- `mvnw`'s executable bit wasn't actually set in git's tracked file mode
+  (`100644`, not `100755`) despite looking executable locally — fixed both
+  the tracked mode and switched the job to `sh mvnw` so it doesn't depend
+  on that bit surviving future checkouts.
+- `mvn sonar:sonar`'s plugin-prefix resolution didn't work in this
+  Maven/image combination — fixed by using the plugin's fully-qualified
+  coordinates instead of the shorthand.
+- SonarCloud assumes a `master` main branch by default; this repo's actual
+  branch (`feature/test-stat-ci`) had to be set as the project's main
+  branch manually in SonarCloud's UI for the dashboard to show anything.
+- **The significant one:** SonarQube Cloud's Free plan doesn't support
+  custom Quality Gates, only the built-in "Sonar way" gate — which is
+  almost entirely New-Code-scoped, so it would pass trivially regardless of
+  how many long-standing seeded vulnerabilities exist in the codebase.
+  Worked around by bypassing the Quality Gate mechanism entirely: the job
+  polls SonarCloud's Compute Engine task for completion, then queries the
+  Issues Search API directly for every unresolved issue on the branch
+  (not just New Code), prints them to the job log (closing the "why
+  doesn't this look like Semgrep's inline output" gap raised earlier), and
+  fails the job only on `BLOCKER`/`CRITICAL` severity.
+
+`docs/sonarqube-setup.md` was written as a generic, second-person guide for
+students mirroring this repo with their own SonarQube Cloud account —
+deliberately scrubbed of first-person references to this project's own
+setup experience, per explicit direction, so it reads as documentation for
+the audience rather than a narrated postmortem.
+
+---
+
+# Week 4 progress — Docker hot-reload infrastructure
+
+Output for requirement 8 of
+[`Weekly Requirements/week-04.md`](../Weekly%20Requirements/week-04.md)
+(added retroactively).
+
+**Backend:** switched `docker-compose.yml`'s `backend` service from
+building/running `Dockerfile`'s packaged-jar image to a dev-mode setup —
+`Dockerfile.dev`, source bind-mounted, `dev-entrypoint.sh` running
+`mvn spring-boot:run` in the background while polling for source changes
+and triggering `mvn compile` on them (`spring-boot-devtools`, already a
+`pom.xml` dependency, then restarts the app automatically once
+`target/classes` changes — it reacts to compiled output, not `.java`
+source directly, so something has to drive that recompilation).
+
+One real bug hit and fixed: the first version of `dev-entrypoint.sh`
+compared source-file timestamps against `target/classes`'s own directory
+mtime as the "last compiled" reference point — that directory's timestamp
+doesn't reliably advance every time Maven recompiles, so once source files
+were newer than that stale reference, the check stayed true forever,
+recompiling on every single poll instead of only real changes. Fixed by
+using a self-controlled sentinel file (`touch`ed immediately after each
+compile) as the reference point instead of relying on Maven's own
+directory-mtime side effects.
+
+**Frontend:** `vite.config.js` gained `server.watch.usePolling` (with a
+300 ms interval) and `server.hmr.clientPort`, plus a `CHOKIDAR_USEPOLLING`
+environment variable on the `frontend` service as a backup — native
+filesystem change events don't reliably cross a Docker bind mount on
+Windows hosts, and Vite's own config-file watcher has the same problem
+watching itself, so a container recreate (not just a file save) is needed
+for watch-related config changes to actually take effect.
+
+**Known tradeoff:** `backend/Dockerfile` (the production-style multi-stage
+build) is no longer what `docker compose up` runs at all — left in place,
+currently unused. Reconciling that (retire it, or keep it for a future
+non-dev build path) is an open decision, not resolved this week.

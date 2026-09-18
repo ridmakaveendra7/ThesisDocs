@@ -243,14 +243,79 @@ reflecting:
 
 ---
 
+## 5–8: retroactively added implementation scope
+
+**These four sections were written *after* the work they describe had
+already happened, not before** — the opposite order this repo's own
+convention calls for (`docs/README.md`: requirements written before a
+week's work starts). §1–4 above were decided and followed properly; §5–8
+are being added now to make the record honest about what actually got
+built this week, not to claim it was planned in advance. See
+`Weekly Progress/week-04.md`'s matching sections for what was actually
+delivered against each.
+
+### 5. Frontend scaffolding (implementation)
+
+**Goal:** build the actual frontend app §1 decided on and §4's spec lays
+out — not just the framework decision, but a working app.
+
+**What to produce:** a real React + Vite project at `finapp/frontend/`; the
+login page/flow (`phase 1 spec.md` Step 4's frontend half); wired to the
+backend per §1's CORS and token-transport decisions.
+
+**Non-goals:** registration, webhook, and any other later-step page —
+those follow `phase 1 spec.md`'s own step order, not all-at-once.
+
+### 6. Backend endpoint/config changes (implementation)
+
+**Goal:** implement the vulnerabilities `phase 1 spec.md` Steps 0–1
+specify, in actual code, not just as a documented plan.
+
+**What to produce:** Vuln 1 (permissive CORS), Vuln 2 (verbose errors),
+Vuln 3 (CSRF-disabled, tagged), Vuln 4 (exposed Actuator) present in code,
+each carrying the numbered-comment convention `phase 1 spec.md` defines.
+
+**Non-goals:** Steps 2–6 (database baseline, registration, login's backend
+half, the Jazzer fuzz test, webhook registration) — not this week.
+
+### 7. CI wiring: SonarQube integration + setup guide
+
+**Goal:** extend `.gitlab/ci/static-analysis.yml` beyond Semgrep (still
+open work from week 3 / `finsec_app_final_spec.md` §5.7), and make that
+extension reproducible for students who mirror this repo with their own
+SonarQube account rather than this project's.
+
+**What to produce:** a `sonarqube` job in `.gitlab/ci/static-analysis.yml`,
+including working around the Free-tier Quality Gate limitation (a
+custom Issues-API-based check instead); `docs/sonarqube-setup.md` as a
+student-facing setup guide.
+
+**Non-goals:** OWASP ZAP wiring — still open, not this week.
+
+### 8. Docker hot-reload infrastructure
+
+**Goal:** make local iteration on the above practical — edits to backend or
+frontend source should be reflected without a manual image rebuild, since
+that's the normal way development actually happens against this stack now.
+
+**What to produce:** a dev-mode `backend` service (`Dockerfile.dev`,
+`dev-entrypoint.sh`, Maven + bind mount + `spring-boot-devtools`-driven
+restart) and a dev-mode `frontend` service (Vite + polling-based file
+watching) in `docker-compose.yml`.
+
+**Non-goals:** a production-shaped deployment story — `backend/Dockerfile`'s
+packaged-jar build is left in place but is no longer what
+`docker compose up` actually runs; reconciling that is a later decision,
+not this week's.
+
+---
+
 ## Non-goals for this week (overall)
 
-- No implementation of anything above — frontend scaffolding, backend
-  endpoint changes, database migration, or CI wiring are all later work,
-  not this week's.
 - No Phase 2 feature work (bank integration, device-key auth, access
   matrix, derived metrics) — this week only reasons about what Phase 2
-  *would* introduce, for the vulnerability-mapping task in §3.
+  *would* introduce, for the vulnerability-mapping task in §3, and §5–8's
+  implementation work stays within Phase 1's own scope.
 
 ## Open questions to resolve during research
 
