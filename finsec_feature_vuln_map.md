@@ -76,12 +76,12 @@ rows with no counterpart there.
 | One-time code used to stop a request being replayed | The code can be reused or guessed | Semgrep, SonarQube, `ent` (entropy testing tool) |
 | Checking payment amount, currency, and account number | Invalid values (e.g. negative or oversized amounts) get accepted | Semgrep, SonarQube, Jazzer fuzz test |
 | Allowing small payments without extra approval, up to a limit | Sending several payments at once can slip past the limit check | `race-the-web` (open-source race-condition tool) |
-| Showing a user their accounts, balances, and transactions | One user can view another user's data by changing an ID in the request | OWASP ZAP Access Control Testing add-on |
-| Showing a user their calculated spending/income summary | One user can view another user's summary the same way | OWASP ZAP Access Control Testing add-on |
+| Showing a user their accounts, balances, and transactions | One user can view another user's data by changing an ID in the request (IDOR, CWE-639) | OWASP ZAP Access Control Testing add-on |
+| Showing a user their calculated spending/income summary | One user can view another user's summary the same way (IDOR, CWE-639) | OWASP ZAP Access Control Testing add-on |
 | Getting a new access token without logging in again | An old token can be reused, or a new session can be forced onto a user | Manual review, `ent` (entropy testing tool) |
 | Keeping track of a user's logged-in session | An attacker can plant or reuse a session ID before the victim logs in | OWASP ZAP (Session Fixation rule) |
 | Reading and using the data the bank sends back | Unexpected or malicious data from the bank isn't handled safely | Semgrep, SonarQube, Jazzer fuzz test |
-| Letting a user view or delete their own stored data | One user can view or delete another user's data | OWASP ZAP Access Control Testing add-on |
+| Letting a user view or delete their own stored data | One user can view or delete another user's data (IDOR, CWE-639) | OWASP ZAP Access Control Testing add-on |
 | Logging in with a username and password | No limit on attempts, so passwords can be guessed automatically | Hydra |
 | Audit logging of payment and consent events | Free-text bank data (e.g. creditor name, remittance info) is written into the log unescaped, so it can be used to inject fake log entries (log injection) | Semgrep, SonarQube |
 | Downloading an account statement or payment receipt | The filename/report reference isn't checked, so a crafted name can read other files on the server (path traversal) — now pulling real statements/receipts built from live bank data, instead of Phase 1's placeholder files | Semgrep, SonarQube |
